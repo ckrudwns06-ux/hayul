@@ -1273,7 +1273,7 @@ const compactPromptText = (text = '', maxLength = 4000) => {
 };
 const buildSafeFashionEditAnchor = (continuityMode = 'memory') => {
   const sourceText = continuityMode === 'direct' ? 'the supplied user reference image' : continuityMode === 'conversation' ? 'the most recent model-generated image already present in the conversation history' : 'the locked visual memory and seed profile';
-  return ["[CRITICAL STYLE & CONSISTENCY DIRECTIVE]", `- Task: Perform a seamless fashion garment replacement using ${sourceText} as the continuity base.`, "- Visual Tone: Professional, high-end commercial fashion or apparel catalog photography.", "- Garments: Depict lingerie, underwear, or swimwear as adult retail catalog fashion items with tasteful coverage.", "- Composition: Keep a neutral fashion pose and the same camera, lighting, background, face, hair, and identity unless the user explicitly requests a change. Faithfully honor the user's explicitly requested body type and proportions.", "- Consistency: ONLY change the specific clothing item or pose requested. Keep all other visual attributes identical."].join('\n');
+  return ["[CRITICAL STYLE & CONSISTENCY DIRECTIVE]", `- Task: Perform a seamless fashion garment replacement using ${sourceText} as the continuity base.`, "- Visual Tone: Professional, high-end commercial fashion or apparel catalog photography.", "- Garments: Depict lingerie, underwear, or swimwear as adult retail catalog fashion items with tasteful coverage.", "- Composition: Keep a neutral fashion pose and the same camera, lighting, background, face, hair, body proportions, and identity unless the user explicitly requests a change.", "- Consistency: ONLY change the specific clothing item or pose requested. Keep all other visual attributes identical."].join('\n');
 };
 const EDIT_INTENT_RULES = [{
   label: 'wardrobe/clothing only',
@@ -1292,18 +1292,19 @@ const EDIT_INTENT_RULES = [{
   pattern: /(배경|장소|방|침실|거실|거리|해변|도시|숲|background|scene|room)/i,
   allowed: "Background may change. Keep subject identity, face, hair, body, pose, wardrobe locked."
 }];
-// 과거에는 친밀 신체부위+접촉 표현을 감지하면 사용자 프롬프트를 "tasteful, non-explicit"
-// 카탈로그 포즈 지시문으로 통째 치환했다. 이 치환은 비노골적 요청(체형/포즈/가슴 크기)까지
-// 함께 무력화해 가중치가 깎이는 원인이었다. 노골적 결과물 차단은 서버 safetySettings
-// (BLOCK_ONLY_HIGH, SEXUALLY_EXPLICIT 등)가 동일하게 담당하므로 검열 수위는 그대로이며,
-// 여기서는 사용자 프롬프트를 보존한다.
 const normalizeSensitivePoseInstruction = (userPrompt = '') => {
-  return cleanPromptText(userPrompt);
+  const cleanUserPrompt = cleanPromptText(userPrompt);
+  const hasIntimateBodyPart = /(가슴|유방|흉부|엉덩이|사타구니|음부|성기|breasts?|boobs?|chest|butt|groin|genitals?)/i.test(cleanUserPrompt);
+  const hasSexualTouchAction = /(만지|만진|만져|주무르|주무른|움켜|더듬|잡아|잡고|터치|touch|grab|grope|fondle|massage|squeeze|hold)/i.test(cleanUserPrompt);
+  if (!hasIntimateBodyPart || !hasSexualTouchAction) return cleanUserPrompt;
+  return ["Change only the pose into a tasteful, non-explicit adult fashion catalog pose.", "Place the hands naturally near the collarbone, shoulders, hair, waist, or hips without touching intimate body parts.", "If lingerie, underwear, or swimwear is present, keep it as adult retail fashion styling.", "Keep the same subject identity, face, hair, outfit, body proportions, background, lighting, and camera unless explicitly requested otherwise."].join('\n');
 };
-// 의상 제거/탈의 요청을 "lingerie set 으로 교체"로 통째 치환하던 로직도 제거한다.
-// 노골적 노출 결과물은 서버 safetySettings 가 동일한 강도로 차단한다.
 const normalizeFashionEditInstruction = (userPrompt = '') => {
-  return normalizeSensitivePoseInstruction(userPrompt);
+  const cleanUserPrompt = normalizeSensitivePoseInstruction(userPrompt);
+  const hasIntimateGarment = /(란제리|속옷|브라|브래지어|팬티|수영복|비키니|lingerie|underwear|bra|panties|swimwear|bikini)/i.test(cleanUserPrompt);
+  const asksRemoval = /(삭제|제거|벗|없애|지우|remove|delete|take off|undress|strip)/i.test(cleanUserPrompt);
+  if (!hasIntimateGarment || !asksRemoval) return cleanUserPrompt;
+  return ["Change the current outfit to a tasteful adult retail lingerie set matching the requested bra and panties styling.", "Treat this as a finished fashion catalog outfit change, not an action sequence.", "Keep the same subject identity, face, hair, body proportions, pose, background, lighting, and camera."].join('\n');
 };
 const buildAllowedChangeContract = (userPrompt = '', hasReferenceImage = false, hasContinuityMemory = false) => {
   if (!hasReferenceImage && !hasContinuityMemory) return '';
@@ -1615,7 +1616,7 @@ const fetchWithRetry = async (url, options, retries = 3) => {
 const buildApiErrorMessage = (data, status, providerName = 'API') => {
   const message = (typeof data?.error === 'string' ? data.error : null) || data?.error?.message || data?.message || data?.detail || data?.msg;
   if (message) return message;
-  if (status === 400) return `${providerName} 요청이 거부되었습니다 (HTTP 400). API 키가 올바르지 않거나 요청 형식에 문제가 있습니다. API 키를 다시 확인해주세요.`;
+  if (status === 400) return `${providerName} 요청이 거부되었습니다 (HTTP 400). API 키가 필요하거나 파라미터가 올바르지 않습니다. (Canvas 외부 실행 시 API 키 필수)`;
   if (status === 401 || status === 403) return `${providerName} 인증에 실패했습니다 (HTTP ${status}). API 키 상태를 확인해주세요.`;
   if (status === 413) return `요청 데이터가 너무 큽니다 (HTTP 413). 용량을 줄여서 다시 시도해주세요.`;
   if (status === 429) return `${providerName} 요청 한도에 도달했습니다. 잠시 후 다시 시도해주세요.`;
