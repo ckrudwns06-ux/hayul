@@ -1583,6 +1583,10 @@ const buildSafeContext = (messages, currentModelId, options = {}) => {
   const safeContents = [];
   let lastRole = null;
   const includeModelImageContent = options.includeModelImageContent !== false;
+  // allowUnsignedModelImage: gemini-3 계열은 평소 서명(thoughtSignature) 없는 model 턴 이미지를
+  // 제거하지만, 교차 모델/공급자(그록 등) 편집의 "낙관적 연속성 시도"에서는 서명 없이도 이미지를
+  // 그대로 포함시킨다. (이 시도가 실패하면 상위 로직이 직접 레퍼런스로 자동 폴백한다.)
+  const allowUnsignedModelImage = Boolean(options.allowUnsignedModelImage);
   let mostRecentImageMsgIdx = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].imageUrl || messages[i].msgType === 'image') {
@@ -1600,7 +1604,8 @@ const buildSafeContext = (messages, currentModelId, options = {}) => {
       });
     }
     if (msg.role === 'model' && msg.msgType === 'image') {
-      const modelHistoryParts = includeModelImageContent && isMostRecentImage ? filterGoogleModelHistoryPartsForRequest(getModelHistoryParts(msg), currentModelId) : [];
+      const rawHistoryParts = includeModelImageContent && isMostRecentImage ? getModelHistoryParts(msg) : [];
+      const modelHistoryParts = allowUnsignedModelImage ? rawHistoryParts : filterGoogleModelHistoryPartsForRequest(rawHistoryParts, currentModelId);
       if (hasInlineImagePart(modelHistoryParts)) {
         modelHistoryParts.forEach(part => parts.push(part));
       } else {
@@ -2205,14 +2210,17 @@ const generateImages = async (prompt, chatHistoryMessages, settings, signal) => 
   let usedReferenceImage = Boolean(effectiveReferenceInline);
   const url = buildGoogleApiUrl(modelId, settings);
   const apiRequestResolution = getApiRequestResolution(settings);
-  const makeGoogleContents = (includeReferenceImage = true, requestPrompt = finalPromptUsed) => {
+  const makeGoogleContents = (includeReferenceImage = true, requestPrompt = finalPromptUsed, options = {}) => {
+    const useModelImageHistory = options.useModelImageHistory ?? canUseConversationModelImage;
+    const allowUnsignedModelImage = Boolean(options.allowUnsignedModelImage);
     const nextContents = includeReferenceImage && effectiveReferenceInline ? [{
       role: 'user',
       parts: [{
         text: requestPrompt
       }, effectiveReferenceInline]
     }] : buildSafeContext(slicedMessages, modelId, {
-      includeModelImageContent: settings.internalReferenceMode !== false && canUseConversationModelImage
+      includeModelImageContent: settings.internalReferenceMode !== false && useModelImageHistory,
+      allowUnsignedModelImage
     });
     if (nextContents.length > 0 && nextContents[0].role === 'model') {
       nextContents.unshift({
@@ -2291,7 +2299,10 @@ const generateImages = async (prompt, chatHistoryMessages, settings, signal) => 
     }
     throw new Error('Google Gemini 요청 한도에 도달했습니다. 잠시 후 다시 시도해주세요.');
   };
-  const collectGoogleImageParts = async requestContents => {
+  const collectGoogleImageParts = async (requestContents, options = {}) => {
+    // stopAfterFirstFailure: 낙관적(서명 없는 히스토리) 프로브에서 첫 호출이 이미지를 못 내면
+    // 즉시 멈춰, 상위의 직접 레퍼런스 폴백으로 넘긴다. 불필요한 배치 반복 호출을 막는다.
+    const stopAfterFirstFailure = Boolean(options.stopAfterFirstFailure);
     const imagePartsToProcess = [];
     let errorMsg = "";
     for (let i = 0; i < countNum; i++) {
@@ -2320,6 +2331,7 @@ const generateImages = async (prompt, chatHistoryMessages, settings, signal) => 
         errorMsg = error?.message || "생성 중 알 수 없는 오류 발생";
         if (imagePartsToProcess.length > 0 || isLikelyRateLimitMessage(errorMsg)) break;
       }
+      if (stopAfterFirstFailure && imagePartsToProcess.length === 0) break;
       if (i < countNum - 1) {
         await delayWithAbort(GOOGLE_BATCH_DELAY_MS, signal);
       }
@@ -2330,14 +2342,38 @@ const generateImages = async (prompt, chatHistoryMessages, settings, signal) => 
       errorMsg
     };
   };
-  let {
-    imagePartsToProcess,
-    errorMsg
-  } = await collectGoogleImageParts(makeGoogleContents(usedReferenceImage, finalPromptUsed));
-  if (imagePartsToProcess.length === 0 && /thought_?signature/i.test(errorMsg || '') && canUseInternalReferenceImageFallback && internalReference?.url) {
+  // 1차 시도 경로 결정.
+  // gemini-3 계열(나노바나나 2/프로)이 서명(thoughtSignature) 없는 외부(그록/무서명 구글) 이미지를
+  // 편집할 때는, 동일 모델 편집과 "동등한 model 턴 연속성"을 먼저 낙관적으로 시도한다(서명 없이 포함).
+  // 플랫폼이 이를 받아주면 나노바나나 1↔그록 과 동일한 (관대한) 연속성 경로를 얻고, 거부하면(이미지 0장)
+  // 곧바로 직접 레퍼런스로 폴백하므로 기존 동작 대비 회귀가 없다.
+  // (나노바나나 1=gemini-2.5 는 서명을 요구하지 않아 이미 위에서 정식 히스토리 경로를 탄다.)
+  const shouldTryUnsignedHistoryFirst = hasConversationModelImageRaw && referenceCompatibility.canUseGoogleModelHistory && requiresSignedGoogleModelHistory(modelId) && !hasGoogleModelHistoryImageSignature(slicedMessages) && canUseInternalReferenceImageFallback && Boolean(internalReference?.url);
+  let usedConversationHistory = canUseConversationModelImage;
+  let imagePartsToProcess;
+  let errorMsg;
+  if (shouldTryUnsignedHistoryFirst) {
+    const optimistic = await collectGoogleImageParts(makeGoogleContents(false, finalPromptUsed, {
+      useModelImageHistory: true,
+      allowUnsignedModelImage: true
+    }), {
+      stopAfterFirstFailure: true
+    });
+    imagePartsToProcess = optimistic.imagePartsToProcess;
+    errorMsg = optimistic.errorMsg;
+    usedConversationHistory = imagePartsToProcess.length > 0;
+  } else {
+    const primary = await collectGoogleImageParts(makeGoogleContents(usedReferenceImage, finalPromptUsed));
+    imagePartsToProcess = primary.imagePartsToProcess;
+    errorMsg = primary.errorMsg;
+  }
+  // 직접 레퍼런스 폴백: (a) 위 낙관적 히스토리 시도가 이미지를 못 냈거나, (b) gemini-3 서명 오류일 때.
+  const needDirectImageFallback = imagePartsToProcess.length === 0 && canUseInternalReferenceImageFallback && internalReference?.url && (shouldTryUnsignedHistoryFirst || /thought_?signature/i.test(errorMsg || ''));
+  if (needDirectImageFallback) {
     const fallbackInline = dataUrlToInlineData(internalReference.url);
     if (fallbackInline) {
       usedReferenceImage = true;
+      usedConversationHistory = false;
       finalPromptUsed = directReferencePrompt;
       const fallbackResult = await collectGoogleImageParts([{
         role: 'user',
@@ -2376,7 +2412,7 @@ const generateImages = async (prompt, chatHistoryMessages, settings, signal) => 
       billingTier: flexActive ? 'flex' : 'standard',
       costUsd: perImageCostUsd,
       costKrw: usdToKrw(perImageCostUsd, settings.fxRate),
-      referenceSource: usedReferenceImage ? hasCurrentUserReference ? 'current-user-upload' : internalReference?.source || 'reference-image' : canUseConversationModelImage ? 'model-turn-history' : internalReference ? 'text-memory-fallback' : '',
+      referenceSource: usedReferenceImage ? hasCurrentUserReference ? 'current-user-upload' : internalReference?.source || 'reference-image' : usedConversationHistory ? 'model-turn-history' : internalReference ? 'text-memory-fallback' : '',
       width: processed.width,
       height: processed.height,
       dpi: processed.dpi,
