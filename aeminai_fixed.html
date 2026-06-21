@@ -2532,10 +2532,11 @@ const App = () => {
     google: '',
     xai: ''
   });
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [loadingType, setLoadingType] = useState('generate');
+  // 생성 상태를 채팅방별로 관리한다. generatingChats: { [chatId]: loadingType }.
+  // 이렇게 하면 한 채팅방에서 이미지가 생성되는 동안 다른 채팅방으로 가서 별도 작업이 가능하다.
+  const [generatingChats, setGeneratingChats] = useState({});
+  const [upscalingMsgIds, setUpscalingMsgIds] = useState({});
   const [upscaleModel, setUpscaleModel] = useState('nanobanana_pro');
-  const [upscalingMsgId, setUpscalingMsgId] = useState(null);
   const [toastMsg, setToastMsg] = useState(null);
   const [lightboxImg, setLightboxImg] = useState(null);
   const [customDialog, setCustomDialog] = useState(null);
@@ -2548,9 +2549,13 @@ const App = () => {
   const fileInputRefImport = useRef(null);
   const textareaRef = useRef(null);
   const editTextareaRef = useRef(null);
-  const abortControllerRef = useRef(null);
-  const generationRunIdRef = useRef(0);
+  // 채팅방별 진행 중 생성: chatId -> { controller, runId, type }. 단일 전역 컨트롤러를 대체한다.
+  const generationsRef = useRef(new Map());
+  const runIdCounterRef = useRef(0);
   const toastTimeoutRef = useRef(null);
+  // 현재 보고 있는 채팅방 기준의 파생 생성 상태(입력/버튼 비활성화·로딩 오버레이에 사용).
+  const isGenerating = Boolean(generatingChats[activeChatId]);
+  const loadingType = generatingChats[activeChatId] || 'generate';
   useEffect(() => {
     if (theme === 'dark') document.documentElement.classList.add('dark');else document.documentElement.classList.remove('dark');
   }, [theme]);
@@ -2951,6 +2956,8 @@ const App = () => {
       title: '채팅방 삭제',
       text: '이 채팅방을 삭제하시겠습니까?',
       onConfirm: () => {
+        // 삭제되는 채팅방에서 진행 중인 생성이 있으면 함께 중단한다(백그라운드 누수 방지).
+        handleCancel(id);
         setChats(prev => prev.filter(c => c.id !== id));
         if (activeChatId === id) setActiveChatId(null);
       }
@@ -3004,27 +3011,59 @@ const App = () => {
       setUploadedImage(imageUrl);
     }
   };
-  const handleCancel = () => {
-    generationRunIdRef.current += 1;
-    const controller = abortControllerRef.current;
-    abortControllerRef.current = null;
-    setIsGenerating(false);
-    setLoadingType('generate');
-    setUpscalingMsgId(null);
-    if (controller && !controller.signal.aborted) controller.abort();
+  // ── 채팅방별 생성 수명주기 헬퍼 ──────────────────────────────────────────────
+  // 같은 채팅방에서 새 생성을 시작하면 그 채팅방의 이전 생성만 중단한다(다른 채팅방은 건드리지 않음).
+  const beginChatGeneration = (chatId, type) => {
+    const existing = generationsRef.current.get(chatId);
+    if (existing?.controller && !existing.controller.signal.aborted) existing.controller.abort();
+    const runId = runIdCounterRef.current + 1;
+    runIdCounterRef.current = runId;
+    const controller = new AbortController();
+    generationsRef.current.set(chatId, {
+      controller,
+      runId,
+      type
+    });
+    setGeneratingChats(prev => ({
+      ...prev,
+      [chatId]: type
+    }));
+    return {
+      runId,
+      controller
+    };
+  };
+  // 이 실행(runId)이 해당 채팅방의 현재 활성 실행인지(취소·새 실행으로 교체되지 않았는지) 확인.
+  const isChatRunCurrent = (chatId, runId) => generationsRef.current.get(chatId)?.runId === runId;
+  const endChatGeneration = (chatId, runId) => {
+    const current = generationsRef.current.get(chatId);
+    if (current && current.runId !== runId) return; // 더 새로운 실행이 이미 이 채팅방을 점유함
+    generationsRef.current.delete(chatId);
+    setGeneratingChats(prev => {
+      if (!(chatId in prev)) return prev;
+      const next = {
+        ...prev
+      };
+      delete next[chatId];
+      return next;
+    });
+  };
+  const handleCancel = (targetChatId = activeChatId) => {
+    const current = generationsRef.current.get(targetChatId);
+    if (!current) return;
+    if (current.controller && !current.controller.signal.aborted) current.controller.abort();
+    endChatGeneration(targetChatId, current.runId);
     showToast("프롬프트 생성이 중단되었습니다.");
   };
-  const executeGenerate = async (contextMessages, promptText, actionType, settingsSnapshot = createGenerationSettingsSnapshot(settings)) => {
-    if (abortControllerRef.current) abortControllerRef.current.abort();
-    const runId = generationRunIdRef.current + 1;
-    generationRunIdRef.current = runId;
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
+  const executeGenerate = async (contextMessages, promptText, actionType, settingsSnapshot = createGenerationSettingsSnapshot(settings), targetChatId = activeChatId) => {
+    const chatId = targetChatId;
+    const {
+      runId,
+      controller
+    } = beginChatGeneration(chatId, actionType);
     const ensureActiveRun = () => {
-      if (controller.signal.aborted || generationRunIdRef.current !== runId) throw makeAbortError();
+      if (controller.signal.aborted || !isChatRunCurrent(chatId, runId)) throw makeAbortError();
     };
-    setIsGenerating(true);
-    setLoadingType(actionType);
     try {
       if (actionType === 'analyze') {
         const textResponse = await analyzeContent(contextMessages, settingsSnapshot, controller.signal);
@@ -3037,7 +3076,7 @@ const App = () => {
           prompt: promptText,
           timestamp: Date.now()
         };
-        setChats(prev => prev.map(c => c.id === activeChatId ? {
+        setChats(prev => prev.map(c => c.id === chatId ? {
           ...c,
           messages: [...c.messages, modelMsg],
           updatedAt: Date.now()
@@ -3089,7 +3128,7 @@ const App = () => {
           modelKey: settingsSnapshot.model,
           timestamp: Date.now() + modelMessages.length
         } : null;
-        setChats(prev => prev.map(c => c.id === activeChatId ? {
+        setChats(prev => prev.map(c => c.id === chatId ? {
           ...c,
           messages: [...c.messages, ...modelMessages, ...(partialErrorMessage ? [partialErrorMessage] : [])],
           updatedAt: Date.now()
@@ -3097,18 +3136,21 @@ const App = () => {
         if (partialErrorMessage) {
           showToast(`일부 요청 실패: ${getErrorToastSummary(partialErrorMessage.text)}`);
         }
+        if (chatId !== activeChatId) {
+          showToast(`다른 채팅방의 이미지 생성이 완료되었습니다.`);
+        }
         incrementUsage(generatedImageCount);
       }
     } catch (error) {
-      const abortedOrStale = error.name === 'AbortError' || error.message === 'Aborted' || generationRunIdRef.current !== runId;
+      const abortedOrStale = error.name === 'AbortError' || error.message === 'Aborted' || !isChatRunCurrent(chatId, runId);
       if (abortedOrStale) {
-        if (generationRunIdRef.current === runId) showToast("프롬프트 생성이 중단되었습니다.");
+        if (isChatRunCurrent(chatId, runId)) showToast("프롬프트 생성이 중단되었습니다.");
       } else {
         if (error.message === 'GOOGLE_API_KEY_MISSING' || error.message === 'XAI_API_KEY_MISSING') setIsSettingsOpen(true);
         const providerName = actionType === 'analyze' || !isXaiModel(settingsSnapshot.model) ? 'Google Gemini' : 'xAI/Grok';
         const localizedError = localizeGenerationError(error, providerName);
         showToast(getErrorToastSummary(localizedError));
-        setChats(prev => prev.map(c => c.id === activeChatId ? {
+        setChats(prev => prev.map(c => c.id === chatId ? {
           ...c,
           messages: [...c.messages, {
             id: Date.now().toString(),
@@ -3123,14 +3165,11 @@ const App = () => {
         } : c));
       }
     } finally {
-      if (generationRunIdRef.current === runId) {
-        setIsGenerating(false);
-        abortControllerRef.current = null;
-      }
+      endChatGeneration(chatId, runId);
     }
   };
   const handleUpscale = async (msg, targetResolution) => {
-    if (isGenerating || upscalingMsgId) return;
+    if (isGenerating || upscalingMsgIds[msg.id]) return;
     if (!msg || msg.msgType !== 'image') return;
     if (!getUpscaleTargets(msg.resolution).includes(targetResolution)) return;
     const source = msg.sourceImageUrl || msg.imageUrl;
@@ -3142,18 +3181,19 @@ const App = () => {
     // Flex ON 이면 Flex 미지원 업스케일 모델(나노바나나 2)은 쓸 수 없으므로 프로로 강제한다.
     const modelKey = settings.flexMode && !isFlexSupportedModel(requestedUpscaleModel) ? 'nanobanana_pro' : requestedUpscaleModel;
     const settingsSnapshot = createGenerationSettingsSnapshot(settings);
+    const chatId = activeChatId;
     // 키리스 Canvas 모드: 업스케일(나노바나나 2·프로)도 키 없이 시도를 허용한다.
-    if (abortControllerRef.current) abortControllerRef.current.abort();
-    const runId = generationRunIdRef.current + 1;
-    generationRunIdRef.current = runId;
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-    setUpscalingMsgId(msg.id);
-    setIsGenerating(true);
-    setLoadingType('upscale');
+    const {
+      runId,
+      controller
+    } = beginChatGeneration(chatId, 'upscale');
+    setUpscalingMsgIds(prev => ({
+      ...prev,
+      [msg.id]: true
+    }));
     try {
       const result = await generateUpscaledImage(source, targetResolution, modelKey, settingsSnapshot, msg.aspectRatio, msg.visualSeed, controller.signal);
-      if (controller.signal.aborted || generationRunIdRef.current !== runId) throw makeAbortError();
+      if (controller.signal.aborted || !isChatRunCurrent(chatId, runId)) throw makeAbortError();
       const newMsg = {
         id: Date.now().toString() + '-up',
         role: 'model',
@@ -3185,7 +3225,7 @@ const App = () => {
         timestamp: Date.now()
       };
       setChats(prev => prev.map(c => {
-        if (c.id !== activeChatId) return c;
+        if (c.id !== chatId) return c;
         const idx = c.messages.findIndex(m => m.id === msg.id);
         const nextMessages = idx === -1 ? [...c.messages, newMsg] : [...c.messages.slice(0, idx + 1), newMsg, ...c.messages.slice(idx + 1)];
         return {
@@ -3197,9 +3237,9 @@ const App = () => {
       incrementUsage(1);
       showToast(`${targetResolution} 업스케일 완료 · 후속 편집 전 이 이미지 삭제 권장`);
     } catch (error) {
-      const abortedOrStale = error.name === 'AbortError' || error.message === 'Aborted' || generationRunIdRef.current !== runId;
+      const abortedOrStale = error.name === 'AbortError' || error.message === 'Aborted' || !isChatRunCurrent(chatId, runId);
       if (abortedOrStale) {
-        if (generationRunIdRef.current === runId) showToast("업스케일이 중단되었습니다.");
+        if (isChatRunCurrent(chatId, runId)) showToast("업스케일이 중단되었습니다.");
       } else if (error.message === 'GOOGLE_API_KEY_MISSING') {
         setIsSettingsOpen(true);
         showToast("⚠️ 업스케일은 Google Gemini API 키가 필요합니다.");
@@ -3209,12 +3249,15 @@ const App = () => {
         showToast(`업스케일 오류: ${error.message}`);
       }
     } finally {
-      setUpscalingMsgId(prev => prev === msg.id ? null : prev);
-      if (generationRunIdRef.current === runId) {
-        setIsGenerating(false);
-        setLoadingType('generate');
-        abortControllerRef.current = null;
-      }
+      setUpscalingMsgIds(prev => {
+        if (!(msg.id in prev)) return prev;
+        const next = {
+          ...prev
+        };
+        delete next[msg.id];
+        return next;
+      });
+      endChatGeneration(chatId, runId);
     }
   };
   const handleAction = async (actionType = 'generate') => {
@@ -3243,7 +3286,7 @@ const App = () => {
     setInput('');
     setUploadedImage(null);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
-    executeGenerate(newMessages, finalInputText, actionType, settingsSnapshot);
+    executeGenerate(newMessages, finalInputText, actionType, settingsSnapshot, activeChatId);
   };
   const startEditing = msg => {
     setEditingMsgId(msg.id);
@@ -3272,7 +3315,7 @@ const App = () => {
       updatedAt: Date.now()
     } : c));
     setEditingMsgId(null);
-    executeGenerate(updatedMessages, editInputValue, 'generate', createGenerationSettingsSnapshot(settings));
+    executeGenerate(updatedMessages, editInputValue, 'generate', createGenerationSettingsSnapshot(settings), activeChatId);
   };
   const handleRegenerate = modelMsgId => {
     const chat = chats.find(c => c.id === activeChatId);
@@ -3306,7 +3349,7 @@ const App = () => {
       messages: newMessages,
       updatedAt: Date.now()
     } : c));
-    executeGenerate(newMessages, referenceText, 'generate', createGenerationSettingsSnapshot(settings));
+    executeGenerate(newMessages, referenceText, 'generate', createGenerationSettingsSnapshot(settings), activeChatId);
   };
   const deleteMessage = msgId => {
     setCustomDialog({
@@ -4097,7 +4140,15 @@ const App = () => {
     className: "text-yellow-500"
   }, React.createElement(Icons.Pin, null)) : React.createElement("span", {
     className: "opacity-0 w-4"
-  }), chat.title), React.createElement("div", {
+  }), generatingChats[chat.id] ? React.createElement("span", {
+    className: "loader shrink-0",
+    style: {
+      width: '11px',
+      height: '11px',
+      borderWidth: '2px'
+    },
+    title: "이 채팅방에서 생성 중"
+  }) : null, chat.title), React.createElement("div", {
     className: "hidden group-hover:flex items-center bg-gray-100 dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 absolute right-2"
   }, React.createElement("button", {
     onClick: e => togglePin(e, chat.id),
@@ -4275,13 +4326,20 @@ const App = () => {
     onClick: () => msg.imageUrl && setLightboxImg(msg)
   }), React.createElement("div", {
     className: "absolute top-2 left-2 bg-black/50 text-white text-[10px] px-2 py-1 rounded backdrop-blur-sm pointer-events-none opacity-0 group-hover/img:opacity-100 transition-opacity"
-  }, msg.resolution || '1K', msg.apiResolution ? ` · API ${msg.apiResolution.toUpperCase()}` : '', msg.visualSeed ? ` · seed ${msg.visualSeed}` : '', msg.width && msg.height ? ` · ${msg.width}x${msg.height}` : '', msg.dpi ? ` · ${msg.dpi}dpi` : '', msg.costKrw ? ` · 약 ${msg.costKrw.toLocaleString('ko-KR')}원` : msg.costUsd ? ` · ${formatKrw(msg.costUsd)}` : '', msg.billingTier === 'flex' ? ' · Flex' : '')) : React.createElement("div", {
+  }, getMessageModelKey(msg) ? `${getModelDisplayName(getMessageModelKey(msg))} · ` : '', msg.resolution || '1K', msg.apiResolution ? ` · API ${msg.apiResolution.toUpperCase()}` : '', msg.visualSeed ? ` · seed ${msg.visualSeed}` : '', msg.width && msg.height ? ` · ${msg.width}x${msg.height}` : '', msg.dpi ? ` · ${msg.dpi}dpi` : '', msg.costKrw ? ` · 약 ${msg.costKrw.toLocaleString('ko-KR')}원` : msg.costUsd ? ` · ${formatKrw(msg.costUsd)}` : '', msg.billingTier === 'flex' ? ' · Flex' : '')) : React.createElement("div", {
     className: `text-sm md:text-[15px] ${msg.msgType === 'error' || msg.text?.includes('⚠️') ? 'text-red-600 dark:text-red-400 font-medium' : 'text-gray-800 dark:text-gray-200'} leading-relaxed whitespace-pre-wrap`
   }, msg.text), msg.msgType === 'image' && (msg.referenceSource === 'upscale' || msg.upscaledFrom) && React.createElement("div", {
     className: "mt-2 flex items-start gap-1.5 text-[11px] md:text-xs text-yellow-800 dark:text-yellow-200 bg-yellow-50 dark:bg-yellow-900/30 border border-yellow-200 dark:border-yellow-800/50 rounded-lg px-2.5 py-2 leading-relaxed"
   }, React.createElement("span", {
     className: "shrink-0"
-  }, "💡"), React.createElement("span", null, "업스케일 이미지입니다. 후속 편집 전 ", React.createElement("strong", null, "이 이미지를 삭제"), "하는 것을 권장합니다(고해상도·노출 이미지는 편집이 거부될 수 있음)."))), msg.msgType === 'image' && msg.imageUrl && (msg.costKrw || typeof msg.costUsd === 'number') && React.createElement("div", {
+  }, "💡"), React.createElement("span", null, "업스케일 이미지입니다. 후속 편집 전 ", React.createElement("strong", null, "이 이미지를 삭제"), "하는 것을 권장합니다(고해상도·노출 이미지는 편집이 거부될 수 있음)."))), msg.msgType === 'image' && msg.imageUrl && getMessageModelKey(msg) && React.createElement("div", {
+    className: "mt-2 mr-1.5 inline-flex items-center gap-1.5 text-[11px] md:text-xs font-semibold px-2.5 py-1.5 rounded-lg border " + ((msg.provider || getModelProvider(getMessageModelKey(msg))) === 'xai' ? "text-gray-700 dark:text-gray-200 bg-gray-100 dark:bg-gray-800 border-gray-200 dark:border-gray-700" : "text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800/50"),
+    title: "이 이미지를 생성한 모델"
+  }, React.createElement("span", null, "🎨"), React.createElement("span", {
+    className: "opacity-70"
+  }, "생성 모델"), React.createElement("strong", null, getModelDisplayName(getMessageModelKey(msg))), msg.upscaledFrom ? React.createElement("span", {
+    className: "opacity-70"
+  }, `· ${msg.upscaledFrom}→${(msg.resolution || '').toUpperCase()} 업스케일`) : null), msg.msgType === 'image' && msg.imageUrl && (msg.costKrw || typeof msg.costUsd === 'number') && React.createElement("div", {
     className: "mt-2 inline-flex flex-wrap items-center gap-1.5 text-[11px] md:text-xs text-green-700 dark:text-green-300 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800/50 rounded-lg px-2.5 py-1.5 font-medium"
   }, React.createElement("span", null, "💳 소모 크레딧"), React.createElement("strong", {
     className: "text-green-800 dark:text-green-200"
@@ -4310,7 +4368,7 @@ const App = () => {
     className: "hover:text-blue-500 flex items-center gap-1.5 text-[11px] md:text-xs font-medium transition"
   }, React.createElement(Icons.Download, null), " Save"), msg.msgType === 'image' && msg.imageUrl && getUpscaleTargets(msg.resolution).length > 0 && React.createElement(React.Fragment, null, React.createElement("span", {
     className: "flex items-center gap-1 text-[11px] md:text-xs text-gray-400 select-none"
-  }, upscalingMsgId === msg.id ? React.createElement("span", {
+  }, upscalingMsgIds[msg.id] ? React.createElement("span", {
     className: "loader",
     style: {
       width: '12px',
@@ -4320,13 +4378,13 @@ const App = () => {
   }) : React.createElement(Icons.Sparkles, null), " 업스케일"), getUpscaleTargets(msg.resolution).map(target => React.createElement("button", {
     key: `up-${target}`,
     onClick: () => handleUpscale(msg, target),
-    disabled: isGenerating || Boolean(upscalingMsgId),
+    disabled: isGenerating || Boolean(upscalingMsgIds[msg.id]),
     title: `${MODEL_INFO[upscaleModel]?.name || ''} 모델로 ${target} 고해상도 업스케일 (선택 이미지를 독립 요청으로 재생성)`,
     className: "hover:text-blue-500 flex items-center gap-1 text-[11px] md:text-xs font-bold transition disabled:opacity-40 disabled:cursor-not-allowed"
   }, `${target}↑`)), React.createElement("select", {
     value: settings.flexMode && upscaleModel === 'nanobanana2' ? 'nanobanana_pro' : upscaleModel,
     onChange: e => setUpscaleModel(e.target.value),
-    disabled: isGenerating || Boolean(upscalingMsgId),
+    disabled: isGenerating,
     title: "업스케일 모델 (나노바나나 2 / 프로)",
     className: "bg-transparent text-[11px] md:text-xs text-gray-400 border border-gray-200 dark:border-gray-700 rounded px-1 py-0.5 outline-none cursor-pointer disabled:opacity-40"
   }, React.createElement("option", {
@@ -4357,7 +4415,7 @@ const App = () => {
   }, loadingType === 'analyze' ? '분석 중...' : loadingType === 'replicate' ? '원본 유지하여 재생성 중...' : loadingType === 'upscale' ? '고해상도 업스케일 변환 중...' : '이미지 렌더링 중...')), React.createElement("div", {
     className: "w-px h-6 bg-gray-200 dark:bg-gray-700"
   }), React.createElement("button", {
-    onClick: handleCancel,
+    onClick: () => handleCancel(),
     className: "flex items-center gap-1.5 text-xs font-bold text-red-500 hover:text-red-600 px-3 py-1.5 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/30"
   }, React.createElement(Icons.Close, null), " \uC911\uC9C0"))), React.createElement("div", {
     ref: messagesEndRef,
