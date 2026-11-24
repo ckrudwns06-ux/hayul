@@ -509,6 +509,50 @@ function(a,b,c){if(!Vd(b))throw Error(m(200));return Wd(null,a,b,!1,c)};Q.unmoun
         @media (min-width: 640px) and (max-width: 1023px), (pointer: coarse) and (min-width: 640px) {
             .settings-panel { max-width: 640px !important; }
         }
+        /* ── 휴대폰·태블릿 보완 ── */
+        /* 알림(토스트)은 누를 것이 없으므로 아래 버튼(완료·보내기)을 가리지 않게 클릭을 통과시키고, 긴 알림은 줄을 바꿔 화면 안에 다 보이게 한다. */
+        .app-toast { pointer-events: none !important; max-width: calc(100vw - 24px); }
+        .app-toast-body { white-space: normal !important; max-width: min(640px, calc(100vw - 24px)); width: max-content; border-radius: 18px !important; overflow-wrap: anywhere; line-height: 1.45; }
+        .app-toast-body > svg { flex-shrink: 0; }
+        /* 아이폰 홈 표시줄·가로 화면 노치 영역(viewport-fit=cover)을 피해 입력창·제목 줄을 둔다. */
+        .app-composer { padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px)); padding-left: max(1rem, env(safe-area-inset-left, 0px)); padding-right: max(1rem, env(safe-area-inset-right, 0px)); }
+        .app-header { padding-left: max(1rem, env(safe-area-inset-left, 0px)); padding-right: max(1rem, env(safe-area-inset-right, 0px)); }
+        @media (min-width: 768px) {
+            .app-composer { padding: 1.5rem max(1.5rem, env(safe-area-inset-right, 0px)) calc(1.5rem + env(safe-area-inset-bottom, 0px)) max(1.5rem, env(safe-area-inset-left, 0px)); }
+            .app-header { padding-left: max(1.5rem, env(safe-area-inset-left, 0px)); padding-right: max(1.5rem, env(safe-area-inset-right, 0px)); }
+        }
+        @media (max-width: 639px) { .app-header { padding-left: max(8px, env(safe-area-inset-left, 0px)); padding-right: max(8px, env(safe-area-inset-right, 0px)); } }
+        @media (max-width: 767px), (max-height: 560px) {
+            /* 휴대폰·낮은 화면: 알림은 화면 위쪽(입력창·창 아래 버튼과 겹치지 않는 곳)에 띄운다. */
+            .app-toast { top: calc(env(safe-area-inset-top, 0px) + 10px); bottom: auto !important; }
+        }
+        @media (max-width: 639px) {
+            /* 휴대폰은 모델 배지를 숨기므로 제목이 남는 폭을 모두 쓴다("새 …"처럼 과하게 잘리지 않게). */
+            .app-header > div:first-child { flex: 1 1 auto; min-width: 0; }
+            .app-header h2 { max-width: none; flex-shrink: 1; min-width: 0; }
+        }
+        /* iOS 사파리는 16px 보다 작은 입력칸에 초점이 가면 화면을 확대한다(휴대폰 터치 화면에서만 입력 글자를 16px 로). */
+        @media (max-width: 767px) and (pointer: coarse) {
+            input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]), textarea, select { font-size: 16px !important; }
+        }
+        /* 입력 영역(문서·단계 패널·첨부 트레이·빠른 설정·입력창)이 화면 높이를 넘지 않게: 패널마다 높이 상한을 두고 그 안에서 스크롤한다.
+           (이전: 폭 768px 이상에서는 트레이 높이 제한이 없어, 가로로 눕힌 휴대폰·낮은 창에서 트레이 윗부분(사진)이 제목 줄 뒤로 숨어 누를 수 없었다.) */
+        @media (min-width: 768px) {
+            .composer-tray { max-height: 42vh; max-height: 42dvh; overflow-y: auto; overscroll-behavior: contain; }
+        }
+        .app-composer:has(.pipeline-panel) .composer-tray, .app-composer:has(.composer-tray ~ .composer-tray) .composer-tray { max-height: 26vh; max-height: 26dvh; }
+        .app-composer:has(.composer-tray) .pipeline-panel { max-height: 26vh !important; max-height: 26dvh !important; }
+        @media (max-height: 560px) {
+            .composer-tray { max-height: 30vh; max-height: 30dvh; overflow-y: auto; overscroll-behavior: contain; }
+            .app-composer:has(.pipeline-panel) .composer-tray, .app-composer:has(.composer-tray ~ .composer-tray) .composer-tray, .app-composer:has(.composer-tray) .pipeline-panel { max-height: 20vh !important; max-height: 20dvh !important; }
+            .pipeline-panel { max-height: 30vh !important; max-height: 30dvh !important; }
+            /* 낮은 화면: 빠른 설정을 한 줄로(옆으로 밀어서 보기) · 입력 영역 위쪽 여백 줄이기 */
+            .input-toolbar { flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; padding-right: 40px; -webkit-mask-image: linear-gradient(to right, #000 86%, transparent); mask-image: linear-gradient(to right, #000 86%, transparent); }
+            .input-toolbar::-webkit-scrollbar { display: none; }
+            .input-toolbar > * { flex: 0 0 auto; white-space: nowrap; }
+            .app-composer { padding-top: 0.5rem !important; }
+            .am-dir-panel { max-height: 100dvh; }
+        }
         /* 🗂 사진별·그룹별 지시(사진 설정 · 그룹 설정 · 전체 사진 목록) — 미리 컴파일한 Tailwind 에 기대지 않는 전용 스타일 */
         .am-dir-overlay { position: fixed; inset: 0; z-index: 260; background: rgb(0 0 0 / 0.6); display: flex; align-items: center; justify-content: center; padding: 16px; }
         .am-dir-panel { background: #fff; color: #111827; border: 1px solid #e5e7eb; border-radius: 16px; width: 100%; max-width: 560px; max-height: 92dvh; display: flex; flex-direction: column; box-shadow: 0 25px 50px -12px rgb(0 0 0 / 0.35); }
@@ -2311,7 +2355,6 @@ const getPerImageEntry = (msg, index) => {
     stages
   } : null;
 };
-const hasPerImageDirectives = msg => getMessageImageUrls(msg).some((_, i) => Boolean(getPerImageEntry(msg, i + 1)));
 // 요청 내용(지시·추가 이미지)에 영향을 주는 지시인지(단계 설정만 있으면 요청 자체는 그대로다).
 const entryAffectsRequest = entry => Boolean(entry && (entry.note || entry.compose || String(entry.group?.note || '').trim() || entry.group?.ref));
 // 첨부 1장 + 사진별 지시(개별 프롬프트·합성용 사진·그룹 지시·그룹 레퍼런스) → 개별 편집 경로(대상 1장 + 추가 이미지)로 처리한다.
@@ -18806,7 +18849,6 @@ const buildBatchPlan = async (prompt, chatHistoryMessages, settings, signal, opt
   const quality = provider === 'openai' ? getOpenaiQuality(settings) : null;
   // 첨부 문서(또는 '이전 문서 함께 보내기'): 실시간과 같은 방식으로 각 항목 프롬프트에 발췌를 넣는다.
   const documentContext = resolveRequestDocuments(chatHistoryMessages);
-  const withDocuments = promptText => injectDocumentContext(promptText, documentContext, prompt, provider, settings);
   const googleBody = (parts, aspectRatio, thinkingPrompt, requestResolution = resolution) => buildGoogleGenerationPayload([{
     role: 'user',
     parts
@@ -20371,7 +20413,6 @@ const extractGeneralResponseText = (data, provider) => {
 const MINIMAX_TEXT_MAX_TOKENS = 32768;
 // 구조화 출력 매개변수를 못 쓰는 경로(MiniMax 공식 API · HF 라우터에서 생각을 켰거나 공급사가 json_schema 를 거부한 경우)의 JSON 지시.
 const buildJsonOutputRule = schema => `OUTPUT FORMAT: reply with only one JSON object — no Markdown, no code fence, no text before or after — that validates against this JSON Schema: ${JSON.stringify(schema)}`;
-const PLANNER_JSON_RULE = buildJsonOutputRule(VISUAL_PLAN_SCHEMA);
 // 생각 블록 제거: <think>…</think>(MiniMax 등) · Gemma 4 <|channel>thought … <channel|>(모델 카드 형식, 공급사가 따로 분리하지 않은 경우).
 const stripThinkBlocks = text => String(text || '').replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<\|channel>thought[\s\S]*?<channel\|>/gi, '').trim();
 // 응답에서 JSON 본문만(생각 블록·코드 울타리·앞뒤 문장 제거).
@@ -26989,7 +27030,18 @@ const App = () => {
       perImage
     }, globalStages);
     const pipelineStages = stagePlan.stages;
-    const allPipelineStages = collectPipelineStages(stagePlan.stages, stagePlan.targets);
+    // 시작 전 확인(프롬프트·모델 키)은 대량 작업으로 넘어가는 사진(21장째부터)의 단계 설정까지 모두 포함한다.
+    const normalizedTrayGroups = normalizeImageGroups(trayGroups);
+    const lazyStageLists = actionType === 'analyze' || combineSend ? {} : Object.fromEntries(uploadedImages.map((item, i) => [i, item.lazy ? resolveEntryStages(getPerImageEntry({
+      perImage: {
+        items: [pickItemDirective(item, groupIds)],
+        groups: normalizedTrayGroups
+      }
+    }, 1), globalStages) : []]));
+    const allPipelineStages = collectPipelineStages(stagePlan.stages, {
+      ...(stagePlan.targets || {}),
+      ...Object.fromEntries(Object.entries(lazyStageLists).map(([i, list]) => [`lazy${i}`, list]))
+    });
     if (allPipelineStages.length && !validatePipelineStart(allPipelineStages)) return;
     const pipeline = createPipelineRun(stagePlan.stages, settings, stagePlan.targets);
     // 📦 대량 작업: 첨부가 TRAY_EAGER_LIMIT 장을 넘거나(개별 편집), 출력이 10장을 넘으면(같은 지시로 여러 장) 한 장씩 처리해 바로 저장한다.
@@ -27108,7 +27160,8 @@ const App = () => {
           chatId: activeChatId,
           previewUrls: trayItems.map(item => item.url),
           previewNames: uploadedImages.map(item => item.name || item.sourceMeta?.name || ''),
-          pipelineStages,
+          // 사진마다 단계(unit.stages)를 쓰므로 공통 표시는 전체 설정 단계다.
+          pipelineStages: globalStages,
           clearInputs: true
         });
         return;
@@ -32688,8 +32741,10 @@ const App = () => {
     className: "hidden sm:inline"
   }, msgSelectMode ? "선택 끝" : "선택")), React.createElement("button", {
     onClick: () => setTheme(theme === 'dark' ? 'light' : 'dark'),
+    title: theme === 'dark' ? '밝은 화면으로' : '어두운 화면으로',
+    "aria-label": theme === 'dark' ? '밝은 화면으로 바꾸기' : '어두운 화면으로 바꾸기',
     className: "p-2.5 rounded-full bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 text-gray-600 dark:text-gray-300 transition-colors shadow-sm"
-  }, React.createElement(Icons.Sun, null)), React.createElement("button", {
+  }, React.createElement(theme === 'dark' ? Icons.Sun : Icons.Moon, null)), React.createElement("button", {
     onClick: () => setIsSettingsOpen(true),
     title: "설정 열기",
     className: "p-2.5 rounded-full bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 text-gray-600 dark:text-gray-300 transition-colors shadow-sm"
@@ -32741,7 +32796,7 @@ const App = () => {
     className: "h-4"
   })), React.createElement("div", {
     ref: setComposerElement,
-    className: "absolute bottom-0 w-full p-4 md:p-6 bg-gradient-to-t from-white via-white dark:from-[#0d1117] dark:via-[#0d1117] to-transparent z-20 pointer-events-none"
+    className: "app-composer absolute bottom-0 w-full p-4 md:p-6 bg-gradient-to-t from-white via-white dark:from-[#0d1117] dark:via-[#0d1117] to-transparent z-20 pointer-events-none"
   }, React.createElement("div", {
     className: "max-w-4xl mx-auto relative pointer-events-auto"
   }, msgSelectMode ? renderMessageSelectBar() : null, msgSelectMode ? null : renderDocumentTray(), msgSelectMode ? null : renderPipelinePanel(), msgSelectMode ? null : renderAttachmentTray(), msgSelectMode ? null : renderInputToolbar(), React.createElement("div", {
@@ -32889,9 +32944,11 @@ const App = () => {
     }),
     onClose: () => setLightboxImg(null)
   }), React.createElement("div", {
-    className: `fixed bottom-10 left-1/2 transform -translate-x-1/2 z-[500] transition-all duration-300 ${toastMsg ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4 pointer-events-none'}`
+    className: `app-toast fixed bottom-10 left-1/2 transform -translate-x-1/2 z-[500] transition-all duration-300 ${toastMsg ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4 pointer-events-none'}`,
+    role: "status",
+    "aria-live": "polite"
   }, React.createElement("div", {
-    className: "bg-gray-900 dark:bg-white text-white dark:text-gray-900 px-5 py-3 rounded-full shadow-2xl flex items-center gap-2 text-sm font-medium whitespace-nowrap"
+    className: "app-toast-body bg-gray-900 dark:bg-white text-white dark:text-gray-900 px-5 py-3 rounded-full shadow-2xl flex items-center gap-2 text-sm font-medium whitespace-nowrap"
   }, React.createElement(Icons.Check, null), " ", toastMsg)));
 };
 const root = ReactDOM.createRoot(document.getElementById('root'));
