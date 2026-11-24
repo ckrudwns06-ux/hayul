@@ -21462,6 +21462,102 @@ const LIVE_KEY_VERIFIERS = {
   minimaxApiKey: verifyMinimaxApiKeyLive,
   minimaxPlanKey: verifyMinimaxPlanKeyLive
 };
+// ─── 🧪 실제 생성 점검(유료) ───────────────────────────────────────────────────────────────────
+// 입력한 키로 실제 API 를 불러 새 기능(사진별 지시·합성용 사진·그룹 지시·그룹 레퍼런스·AI 분류·사진별 단계 편집)을 점검한다.
+// 가장 싼 설정(1K·1장·언어 모델 생각 낮음)으로, 채팅과 같은 생성 경로(executeGenerate)를 그대로 거친다. 보고서에는 키가 들어가지 않는다.
+const LIVE_TEST_BUILD = 'aeminai-v2 · 사진별 지시 판(2026-11-24)';
+const LIVE_TEST_PROVIDERS = [{
+  id: 'google',
+  label: 'Google',
+  model: 'nanobanana2_lite',
+  keyField: 'googleApiKey',
+  scenarios: ['T1', 'T2', 'T3', 'T4', 'T5']
+}, {
+  id: 'openai',
+  label: 'OpenAI',
+  model: 'gpt_image_2_6_flare',
+  keyField: 'openaiApiKey',
+  scenarios: ['T2']
+}, {
+  id: 'xai',
+  label: 'xAI',
+  model: 'grok_imagine_2',
+  keyField: 'xaiApiKey',
+  scenarios: ['T2']
+}, {
+  id: 'qwen',
+  label: 'Qwen(HF 무료 GPU)',
+  model: 'qwen_image_2_1_turbo',
+  keyField: 'hfToken',
+  scenarios: ['T2']
+}, {
+  id: 'minimax',
+  label: 'MiniMax(API 키)',
+  model: 'minimax_h3_image_highspeed',
+  keyField: 'minimaxApiKey',
+  scenarios: ['T2']
+}];
+const LIVE_TEST_SCENARIO_LABELS = {
+  T1: '글자만으로 새 이미지',
+  T2: '사진 1장 + 개별 지시 + 합성용 사진',
+  T3: '사진 2장 개별 편집 + 그룹 지시·그룹 레퍼런스 + 사진별 2단계',
+  T4: '사진 2장 합성 + 사진별 메모',
+  T5: 'AI 분류(사람·로봇 4장)'
+};
+// 점검 이미지(그림 문자 한 개 + 단색 배경). 보고서 판정에 쓰는 지시 문구는 요청 본문에서 그대로 찾는다.
+const LIVE_TEST_MARKERS = {
+  note: '합성용 사진의 모자를 이 사람 머리에 씌워 주세요',
+  groupPerson: '손에 컵라면을 들고 있게 해 주세요',
+  groupRobot: '등에 충전 케이블을 연결해 주세요',
+  stage: '흑백 사진처럼 바꿔 주세요',
+  combineLeft: '강아지는 왼쪽에 두세요',
+  combineRight: '사람은 오른쪽에 두세요'
+};
+const makeLiveTestImage = (emoji, background) => {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 384;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = background;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.font = '220px "Noto Color Emoji","Apple Color Emoji","Segoe UI Emoji",sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(emoji, 256, 200);
+  return canvas.toDataURL('image/png');
+};
+// 요청 본문 요약(키·헤더는 기록하지 않는다): 입력 이미지 수 · 점검 문구 포함 여부.
+const summarizeLiveTestRequest = (url, init = {}) => {
+  let host = '';
+  let path = '';
+  try {
+    const parsed = new URL(url);
+    host = parsed.host;
+    path = parsed.pathname;
+  } catch (error) {
+    path = String(url || '').slice(0, 80);
+  }
+  let images = 0;
+  let markers = [];
+  const body = init?.body;
+  if (typeof body === 'string') {
+    images = (body.match(/"inlineData"|"inline_data"/g) || []).length + (body.match(/data:image\//g) || []).length;
+    markers = Object.entries(LIVE_TEST_MARKERS).filter(([, text]) => body.includes(text)).map(([key]) => key);
+  } else if (typeof FormData !== 'undefined' && body instanceof FormData) {
+    for (const [, value] of body.entries()) {
+      if (value instanceof Blob) images += 1;else if (typeof value === 'string') Object.entries(LIVE_TEST_MARKERS).forEach(([key, text]) => {
+        if (value.includes(text) && !markers.includes(key)) markers.push(key);
+      });
+    }
+  }
+  return {
+    host,
+    path,
+    method: String(init?.method || 'GET').toUpperCase(),
+    images,
+    markers
+  };
+};
 // ─── 🗂 AI 사진 분류 ───────────────────────────────────────────────────────────────────────────
 // 사용자가 적은 분류 기준(예: "사람이 있는 사진끼리, 로봇이 있는 사진끼리")으로 첨부 사진을 그룹으로 나눈다.
 // 언어 모델 = 제작 계획과 같은 모델(설정 · 고른 모델 또는 같은 회사 자동). 사진은 긴 변 512px JPEG 썸네일로만 보낸다(원본은 보내지 않음).
@@ -23279,6 +23375,9 @@ const App = () => {
     minimax: false,
     open: false
   });
+  // 🧪 실제 생성 점검 창 상태({ providers, running, rows, report, chatId, confirm }) — null 이면 닫힘.
+  const [liveTest, setLiveTest] = useState(null);
+  const liveTestControllerRef = useRef(null);
   // 🔑 키 실시간 검증 결과(필드 → { checking, level, summary, details, fp, at }).
   const [liveKeyChecks, setLiveKeyChecks] = useState({});
   const liveKeyTimersRef = useRef({});
@@ -28820,7 +28919,12 @@ const App = () => {
       onClick: recheckAllKeys,
       "data-testid": "api-keys-recheck",
       className: "ml-3 text-[11px] text-blue-600 dark:text-blue-400 hover:underline font-semibold transition"
-    }, "🔑 모든 키 다시 확인(무료)"), React.createElement("p", {
+    }, "🔑 모든 키 다시 확인(무료)"), React.createElement("button", {
+      type: "button",
+      onClick: openLiveTest,
+      "data-testid": "live-test-open",
+      className: "ml-3 text-[11px] text-indigo-600 dark:text-indigo-300 hover:underline font-semibold transition"
+    }, "🧪 실제 생성 점검(유료)"), React.createElement("p", {
       className: "mt-1 text-[11px] text-gray-500 dark:text-gray-400 leading-relaxed"
     }, "키를 넣으면 잠시 뒤 자동으로 확인합니다: 키가 맞는지 + 이 앱이 쓰는 모델을 그 키로 쓸 수 있는지(과금 없는 조회만)."), isSharedPreviewHost() ? React.createElement("p", {
       className: "mt-2 p-2 rounded-lg text-[11px] font-semibold leading-relaxed bg-yellow-50 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-200 border border-yellow-200 dark:border-yellow-800/50",
@@ -32764,6 +32868,586 @@ const App = () => {
       "data-testid": `open-items-${target}`
     }, "📋 전체 사진") : null));
   };
+  // ── 🧪 실제 생성 점검(유료) ──
+  const liveTestSettingsFor = provider => {
+    const current = settingsRef.current || settings;
+    return createGenerationSettingsSnapshot({
+      ...current,
+      model: provider.model,
+      resolution: '1K',
+      aspectRatio: '1:1',
+      count: '1',
+      saveMode: true,
+      batchMode: false,
+      flexMode: false,
+      webSearch: false,
+      imageSearch: false,
+      multiImageMode: 'each',
+      styleMatchMode: 'off',
+      keepSourceAspect: true,
+      regenerateAnchors: false,
+      consistencyBoost: false,
+      pipelineMode: false,
+      pipelineRegen: false,
+      imagePlannerOff: false,
+      generalPlanner: 'auto',
+      plannerThinking: {
+        ...normalizePlannerThinking(current.plannerThinking),
+        google: 'LOW',
+        openai: 'low',
+        xai: 'low',
+        minimax: 'low'
+      },
+      xaiQuality: 'low',
+      openaiQuality: 'low',
+      minimaxRoute: 'minimax'
+    });
+  };
+  // 점검 1건 = 채팅과 같은 생성 경로(executeGenerate). 첨부·사진별 지시·그룹으로 사용자 메시지를 만들고 결과 메시지를 읽는다.
+  const runLiveGeneration = async ({
+    chatId,
+    snap,
+    text,
+    images = [],
+    items = [],
+    groups = [],
+    mode = 'each',
+    withPipeline = false,
+    signal
+  }) => {
+    const trays = [];
+    for (const url of images) trays.push(await prepareTrayImage(url, signal));
+    const urls = trays.map(item => item.url);
+    const directiveItems = trays.map((item, i) => ({
+      ...item,
+      ...(items[i] || {})
+    }));
+    const perImage = buildPerImagePayload(directiveItems, groups);
+    const originals = urls.length && mode !== 'combine' && snap.autoPreserve !== false ? await prepareImageOriginals(trays) : [];
+    const msg = {
+      id: createMessageId('u'),
+      role: 'user',
+      text,
+      imageUrl: urls[0] || null,
+      ...(urls.length > 1 ? {
+        imageUrls: urls,
+        multiImage: {
+          mode,
+          anchors: [],
+          keepSourceAspect: true,
+          regenerateAnchors: false,
+          consistencyBoost: false
+        }
+      } : {}),
+      ...(originals.some(Boolean) ? {
+        imageOriginals: originals
+      } : {}),
+      ...(perImage ? {
+        perImage
+      } : {}),
+      visualSeed: createVisualSeed(),
+      timestamp: Date.now()
+    };
+    setChats(prev => prev.map(c => c.id === chatId ? {
+      ...c,
+      messages: [...c.messages, msg],
+      updatedAt: Date.now()
+    } : c));
+    let pipeline = null;
+    if (withPipeline) {
+      const plan = buildPipelineStagePlan(msg, []);
+      const stages = collectPipelineStages(plan.stages, plan.targets);
+      if (stages.length && !validatePipelineStart(stages)) throw new Error('단계 편집 시작 확인 실패(키·프롬프트)');
+      pipeline = createPipelineRun(plan.stages, snap, plan.targets);
+    }
+    throwIfAborted(signal);
+    // 점검끼리 섞이지 않게 이번 요청 메시지만 문맥으로 쓴다.
+    await executeGenerate([msg], text, 'generate', snap, chatId, pipeline ? {
+      pipeline
+    } : {});
+    const chat = (await readLatestChats()).find(c => c.id === chatId);
+    const outputs = (chat?.messages || []).filter(m => m.sourceUserMsgId === msg.id);
+    const resultImages = outputs.filter(m => m.msgType === 'image');
+    const planCosts = new Map();
+    outputs.forEach(m => {
+      if (m.visualPlan && typeof m.visualPlan.costUsd === 'number') planCosts.set(JSON.stringify(m.visualPlan.usage || m.id), m.visualPlan.costUsd);
+    });
+    return {
+      images: resultImages,
+      errors: outputs.filter(m => m.msgType === 'error').map(m => String(m.text || '')),
+      usd: resultImages.reduce((sum, m) => sum + (Number(m.costUsd) || 0), 0) + [...planCosts.values()].reduce((sum, usd) => sum + usd, 0)
+    };
+  };
+  const LIVE_TEST_IMAGES = () => ({
+    person: makeLiveTestImage('🧑', '#dbeafe'),
+    person2: makeLiveTestImage('👩', '#e0e7ff'),
+    robot: makeLiveTestImage('🤖', '#fef3c7'),
+    robot2: makeLiveTestImage('🤖', '#ccfbf1'),
+    hat: makeLiveTestImage('🎩', '#f3f4f6'),
+    battery: makeLiveTestImage('🔋', '#dcfce7'),
+    dog: makeLiveTestImage('🐶', '#fce7f3')
+  });
+  const runLiveScenario = async (provider, code, chatId, signal) => {
+    const snap = liveTestSettingsFor(provider);
+    const img = LIVE_TEST_IMAGES();
+    if (code === 'T1') return runLiveGeneration({
+      chatId,
+      snap,
+      text: '흰 배경 위에 빨간 사과 한 개를 그려 주세요.',
+      signal
+    });
+    if (code === 'T2') return runLiveGeneration({
+      chatId,
+      snap,
+      text: '배경을 맑은 하늘로 바꿔 주세요.',
+      images: [img.person],
+      items: [{
+        note: LIVE_TEST_MARKERS.note,
+        compose: {
+          url: img.hat,
+          name: '모자.png'
+        }
+      }],
+      signal
+    });
+    if (code === 'T3') return runLiveGeneration({
+      chatId,
+      snap,
+      text: '배경을 마라톤 경기장으로 바꿔 주세요.',
+      images: [img.robot, img.person],
+      groups: [{
+        id: 'live-robot',
+        name: '로봇',
+        note: LIVE_TEST_MARKERS.groupRobot,
+        ref: {
+          url: img.battery,
+          name: '배터리.png'
+        },
+        stages: null,
+        color: getGroupColor(0)
+      }, {
+        id: 'live-person',
+        name: '사람',
+        note: LIVE_TEST_MARKERS.groupPerson,
+        ref: null,
+        stages: null,
+        color: getGroupColor(1)
+      }],
+      items: [{
+        groupId: 'live-robot'
+      }, {
+        groupId: 'live-person',
+        stages: {
+          mode: 'custom',
+          stages: [{
+            enabled: true,
+            model: provider.model,
+            prompt: LIVE_TEST_MARKERS.stage
+          }, {
+            enabled: false,
+            model: provider.model,
+            prompt: ''
+          }]
+        }
+      }],
+      withPipeline: true,
+      signal
+    });
+    if (code === 'T4') return runLiveGeneration({
+      chatId,
+      snap,
+      text: '두 사진의 주인공이 공원 한 장면에 함께 있게 합성해 주세요.',
+      images: [img.dog, img.person],
+      items: [{
+        note: LIVE_TEST_MARKERS.combineLeft
+      }, {
+        note: LIVE_TEST_MARKERS.combineRight
+      }],
+      mode: 'combine',
+      signal
+    });
+    // T5: AI 분류(사진을 실제 언어 모델에 보내 그룹을 받는다).
+    const result = await classifyAttachedImages({
+      entries: [img.robot, img.person, img.robot2, img.person2].map((url, i) => ({
+        index: i + 1,
+        item: {
+          url,
+          name: `#${i + 1}`
+        }
+      })),
+      instruction: '사람이 있는 사진끼리, 로봇이 있는 사진끼리 분류해줘',
+      settings: snap,
+      signal,
+      onCost: cost => recordSpend([{
+        p: cost.provider,
+        u: cost.usd,
+        k: 'plan'
+      }])
+    });
+    return {
+      classification: result,
+      images: [],
+      errors: [],
+      usd: result.costUsd
+    };
+  };
+  // 판정: 결과 장수·오류 + 요청 기록(입력 이미지 수·지시 문구 전달)으로 새 기능이 실제 요청에 반영됐는지 본다.
+  const judgeLiveScenario = (code, outcome, requests, provider) => {
+    const modelId = getModelId(provider.model);
+    const isImageRequest = req => req.method === 'POST' && (provider.id === 'google' ? req.path.includes(`/${modelId}:`) : provider.id === 'qwen' ? /\.hf\.space$/.test(req.host) : /\/v1\/images\//.test(req.path));
+    const imageRequests = requests.filter(isImageRequest);
+    const maxInputs = Math.max(0, ...imageRequests.map(req => req.images));
+    const uploaded = provider.id === 'qwen' ? imageRequests.filter(req => /upload/.test(req.path)).reduce((sum, req) => sum + req.images, 0) : maxInputs;
+    const sent = key => requests.some(req => req.markers.includes(key));
+    const failedRequests = requests.filter(req => req.status && req.status >= 400);
+    const base = `결과 ${outcome.images.length}장 · 이미지 요청 ${imageRequests.length}회`;
+    const errorText = outcome.errors.length ? ` · 오류: ${getErrorToastSummary(outcome.errors[0]).slice(0, 160)}` : '';
+    if (code === 'T5') {
+      const result = outcome.classification;
+      const groupOf = index => result.groups.find(group => group.members.includes(index))?.name || null;
+      const ok = Boolean(groupOf(1)) && groupOf(1) === groupOf(3) && groupOf(2) === groupOf(4) && groupOf(1) !== groupOf(2) && !result.unassigned.length;
+      return {
+        ok,
+        detail: `그룹 ${result.groups.length}개(${result.groups.map(group => `${group.name}: ${group.members.map(n => `#${n}`).join(',')}`).join(' / ')})${result.unassigned.length ? ` · 미분류 ${result.unassigned.map(n => `#${n}`).join(',')}` : ''} · 기대: #1·#3 로봇, #2·#4 사람 → ${ok ? '일치' : '불일치'}`
+      };
+    }
+    if (code === 'T1') return {
+      ok: outcome.images.length >= 1 && !outcome.errors.length,
+      detail: `${base}${errorText}`
+    };
+    if (code === 'T2') {
+      const inputs = provider.id === 'qwen' ? uploaded : maxInputs;
+      const ok = outcome.images.length >= 1 && !outcome.errors.length && inputs >= 2 && sent('note');
+      return {
+        ok,
+        detail: `${base} · 입력 이미지 ${inputs}장(대상+합성용 = 2장 이상이어야 함) · 개별 지시 전달 ${sent('note') ? '확인' : '안 됨'}${errorText}`
+      };
+    }
+    if (code === 'T3') {
+      const staged = outcome.images.filter(m => m.pipelineStage?.total === 2);
+      const ok = outcome.images.length === 2 && !outcome.errors.length && sent('groupRobot') && sent('groupPerson') && sent('stage') && maxInputs >= 2 && staged.length === 1;
+      return {
+        ok,
+        detail: `${base} · 그룹 지시 전달(로봇 ${sent('groupRobot') ? '확인' : '안 됨'}·사람 ${sent('groupPerson') ? '확인' : '안 됨'}) · 그룹 레퍼런스 포함 요청 ${maxInputs >= 2 ? '확인' : '안 됨'} · 2단계 실행 ${sent('stage') ? '확인' : '안 됨'}(2단계 결과 ${staged.length}장 — 기대 1장)${errorText}`
+      };
+    }
+    const ok = outcome.images.length >= 1 && !outcome.errors.length && sent('combineLeft') && sent('combineRight') && maxInputs >= 2 && outcome.images.every(m => m.multiMode === 'combine');
+    return {
+      ok,
+      detail: `${base} · 입력 이미지 ${maxInputs}장 · 사진별 메모 전달 ${sent('combineLeft') && sent('combineRight') ? '확인' : '안 됨'}${failedRequests.length ? ` · 실패 요청 ${failedRequests.length}건` : ''}${errorText}`
+    };
+  };
+  const openLiveTest = () => setLiveTest(prev => prev?.running ? prev : {
+    providers: Object.fromEntries(LIVE_TEST_PROVIDERS.map(provider => [provider.id, Boolean(String(settings[provider.keyField] || '').trim())])),
+    running: false,
+    rows: prev?.rows || [],
+    report: prev?.report || '',
+    chatId: prev?.chatId || null,
+    confirm: false
+  });
+  const buildLiveTestReport = (rows, log, startedAt) => {
+    const lines = [`🧪 애미나이 실제 생성 점검 보고서 (키 미포함)`, `판: ${LIVE_TEST_BUILD} · ${new Date(startedAt).toLocaleString('ko-KR')} · ${Math.round((Date.now() - startedAt) / 1000)}초`];
+    LIVE_TEST_PROVIDERS.forEach(provider => {
+      const own = rows.filter(row => row.providerId === provider.id);
+      if (!own.length) return;
+      const snap = liveTestSettingsFor(provider);
+      lines.push('', `[${provider.label}] 이미지 ${getModelDisplayName(provider.model)} 1K · 언어 모델 ${describePlanLanguageModel(snap)}`);
+      own.forEach(row => lines.push(`${row.state === 'ok' ? '✅' : row.state === 'stopped' ? '⏹' : '❌'} ${row.code} ${row.title} — ${row.detail || ''}${row.seconds != null ? ` · ${row.seconds}초` : ''}${row.usd ? ` · ${formatKrw(row.usd, settings.fxRate)}` : ''}`));
+    });
+    const totalUsd = rows.reduce((sum, row) => sum + (Number(row.usd) || 0), 0);
+    lines.push('', `합계: 통과 ${rows.filter(row => row.state === 'ok').length}/${rows.length} · 비용 ${formatKrw(totalUsd, settings.fxRate)}(앱 계산 · 실제 청구는 각 회사 기준)`);
+    const generation = log.filter(req => req.method === 'POST');
+    if (generation.length) {
+      lines.push('', '요청 기록(POST · 키·헤더 제외):');
+      generation.slice(0, 60).forEach(req => lines.push(`- ${req.host}${req.path} → ${req.status ?? '응답 없음'}${req.images ? ` · 이미지 ${req.images}` : ''}${req.markers.length ? ` · 지시 ${req.markers.join(',')}` : ''}`));
+      if (generation.length > 60) lines.push(`- …외 ${generation.length - 60}건`);
+    }
+    return lines.join('\n');
+  };
+  const runLiveTest = async () => {
+    if (liveTest?.running) return;
+    const chosen = LIVE_TEST_PROVIDERS.filter(provider => liveTest?.providers?.[provider.id]);
+    if (!chosen.length) {
+      showToast('🧪 점검할 회사를 고르세요.');
+      return;
+    }
+    const controller = new AbortController();
+    liveTestControllerRef.current = controller;
+    const startedAt = Date.now();
+    const chatId = `livetest-${startedAt}`;
+    setChats(prev => [{
+      id: chatId,
+      title: `🧪 실제 생성 점검 ${new Date(startedAt).toLocaleString('ko-KR')}`,
+      pinned: false,
+      messages: [],
+      updatedAt: startedAt
+    }, ...(prev || [])]);
+    setActiveChatId(chatId);
+    setIsSettingsOpen(false);
+    const log = [];
+    const originalFetch = window.fetch;
+    window.fetch = async (input, init) => {
+      const url = typeof input === 'string' ? input : input?.url || String(input);
+      const entry = summarizeLiveTestRequest(url, init || {});
+      log.push(entry);
+      try {
+        const response = await originalFetch(input, init);
+        entry.status = response.status;
+        return response;
+      } catch (error) {
+        entry.status = 0;
+        throw error;
+      }
+    };
+    const rows = [];
+    const publish = () => setLiveTest(prev => prev ? {
+      ...prev,
+      rows: rows.map(row => ({
+        ...row
+      }))
+    } : prev);
+    setLiveTest(prev => ({
+      ...(prev || {}),
+      running: true,
+      confirm: false,
+      rows: [],
+      report: '',
+      chatId
+    }));
+    try {
+      for (const provider of chosen) {
+        for (const code of provider.scenarios) {
+          if (controller.signal.aborted) break;
+          const row = {
+            providerId: provider.id,
+            provider: provider.label,
+            code,
+            title: LIVE_TEST_SCENARIO_LABELS[code],
+            state: 'running'
+          };
+          rows.push(row);
+          publish();
+          const started = Date.now();
+          const logStart = log.length;
+          try {
+            const outcome = await runLiveScenario(provider, code, chatId, controller.signal);
+            const verdict = judgeLiveScenario(code, outcome, log.slice(logStart), provider);
+            Object.assign(row, {
+              state: verdict.ok ? 'ok' : 'fail',
+              detail: verdict.detail,
+              usd: outcome.usd
+            });
+          } catch (error) {
+            if (error?.name === 'AbortError' || controller.signal.aborted) {
+              Object.assign(row, {
+                state: 'stopped',
+                detail: '중지함'
+              });
+              break;
+            }
+            Object.assign(row, {
+              state: 'fail',
+              detail: getErrorToastSummary(String(error?.message || '').startsWith('⚠️') ? String(error.message) : localizeGenerationError(error, provider.label)).slice(0, 240)
+            });
+          }
+          row.seconds = Math.round((Date.now() - started) / 100) / 10;
+          publish();
+        }
+      }
+    } finally {
+      window.fetch = originalFetch;
+      liveTestControllerRef.current = null;
+      const report = buildLiveTestReport(rows, log, startedAt);
+      setLiveTest(prev => ({
+        ...(prev || {}),
+        running: false,
+        rows: rows.map(row => ({
+          ...row
+        })),
+        report
+      }));
+      showToast(`🧪 점검 끝 · 통과 ${rows.filter(row => row.state === 'ok').length}/${rows.length}`);
+    }
+  };
+  const stopLiveTest = () => {
+    liveTestControllerRef.current?.abort();
+    const chatId = liveTest?.chatId;
+    if (chatId) cancelAllRunsSilently(chatId);
+  };
+  const copyLiveTestReport = () => {
+    const text = liveTest?.report || '';
+    if (!text) return;
+    const fallback = () => {
+      const el = document.getElementById('liveTestReport');
+      if (el) {
+        el.focus();
+        el.select();
+      }
+      showToast('보고서를 선택했습니다. 길게 눌러 복사하세요.');
+    };
+    try {
+      navigator.clipboard.writeText(text).then(() => showToast('📋 보고서를 복사했습니다(키 미포함).'), fallback);
+    } catch (error) {
+      fallback();
+    }
+  };
+  const renderLiveTestPanel = () => {
+    if (!liveTest) return null;
+    const h = React.createElement;
+    const rows = liveTest.rows || [];
+    const estimate = LIVE_TEST_PROVIDERS.filter(provider => liveTest.providers?.[provider.id]).map(provider => {
+      const snap = liveTestSettingsFor(provider);
+      const imageCount = provider.scenarios.reduce((sum, code) => sum + (code === 'T3' ? 3 : code === 'T5' ? 0 : 1), 0);
+      const usd = estimatePerImageUsd(snap, true);
+      return {
+        provider,
+        imageCount,
+        usd: usd == null ? null : usd * imageCount
+      };
+    });
+    const knownUsd = estimate.reduce((sum, item) => sum + (item.usd || 0), 0);
+    return h("div", {
+      className: "am-dir-overlay",
+      onClick: () => liveTest.running ? null : setLiveTest(prev => prev ? {
+        ...prev,
+        confirm: false
+      } : prev)
+    }, h("div", {
+      className: "am-dir-panel am-wide",
+      role: "dialog",
+      "aria-modal": "true",
+      "aria-label": "실제 생성 점검",
+      onClick: e => e.stopPropagation(),
+      "data-testid": "live-test-panel"
+    }, h("div", {
+      className: "am-dir-head"
+    }, h("h3", null, "🧪 실제 생성 점검(유료)"), h("button", {
+      type: "button",
+      className: "am-dir-btn",
+      disabled: liveTest.running,
+      onClick: () => setLiveTest(null),
+      "aria-label": "닫기"
+    }, "✕")), h("div", {
+      className: "am-dir-body"
+    }, h("p", {
+      className: "am-dir-hint"
+    }, "입력한 키로 실제 API를 불러 새 기능(개별 지시·합성용 사진·그룹 지시·그룹 레퍼런스·AI 분류·사진별 단계 편집)을 가장 싼 설정(1K·1장·언어 모델 생각 낮음)으로 확인합니다. 요금이 나갑니다. 결과 이미지는 '🧪 실제 생성 점검' 채팅방에 남고, 보고서에는 키가 들어가지 않습니다."), h("div", {
+      className: "am-dir-card"
+    }, LIVE_TEST_PROVIDERS.map(provider => {
+      const hasKey = Boolean(String(settings[provider.keyField] || '').trim());
+      const check = liveKeyChecks[provider.keyField];
+      const item = estimate.find(entry => entry.provider.id === provider.id);
+      return h("label", {
+        key: provider.id,
+        className: "am-dir-row",
+        style: {
+          alignItems: 'flex-start',
+          opacity: hasKey ? 1 : 0.5
+        }
+      }, h("input", {
+        type: "checkbox",
+        checked: Boolean(liveTest.providers?.[provider.id]),
+        disabled: liveTest.running || !hasKey,
+        onChange: e => {
+          const checked = e.target.checked;
+          setLiveTest(prev => prev ? {
+            ...prev,
+            providers: {
+              ...prev.providers,
+              [provider.id]: checked
+            },
+            confirm: false
+          } : prev);
+        },
+        "data-testid": `live-test-${provider.id}`,
+        style: {
+          marginTop: 3
+        }
+      }), h("span", {
+        style: {
+          flex: '1 1 200px',
+          minWidth: 0
+        }
+      }, h("span", {
+        className: "am-dir-label",
+        style: {
+          margin: 0
+        }
+      }, `${provider.label} · ${getModelDisplayName(provider.model)}`), h("span", {
+        className: "am-dir-hint",
+        style: {
+          display: 'block'
+        }
+      }, `${provider.scenarios.map(code => `${code} ${LIVE_TEST_SCENARIO_LABELS[code]}`).join(' / ')}${hasKey ? check?.level === 'error' ? ' · ❌ 키 확인 실패' : '' : ' · 키 없음'}${item ? ` · 이미지 ${item.imageCount}장 ${formatKrw(item.usd, settings.fxRate)}` : ''}`)));
+    })), h("p", {
+      className: "am-dir-hint"
+    }, `예상: 이미지 ${formatKrw(knownUsd, settings.fxRate)} + 언어 모델 호출(소액). Qwen은 HF 무료 GPU 할당량이 없으면 PRO 크레딧에서 차감되거나 할당량 오류로 끝납니다.`), liveTest.confirm && !liveTest.running ? h("div", {
+      className: "am-dir-card",
+      style: {
+        borderColor: '#f59e0b'
+      }
+    }, h("p", {
+      className: "am-dir-warn"
+    }, `요금이 나갑니다(이미지 ${formatKrw(knownUsd, settings.fxRate)} + 언어 모델). 시작할까요?`), h("div", {
+      className: "am-dir-row"
+    }, h("button", {
+      type: "button",
+      className: "am-dir-btn am-primary",
+      onClick: runLiveTest,
+      "data-testid": "live-test-confirm"
+    }, "네, 점검 시작"), h("button", {
+      type: "button",
+      className: "am-dir-btn",
+      onClick: () => setLiveTest(prev => prev ? {
+        ...prev,
+        confirm: false
+      } : prev)
+    }, "취소"))) : null, rows.length ? h("div", {
+      className: "am-dir-card",
+      "data-testid": "live-test-rows"
+    }, rows.map((row, i) => h("p", {
+      key: `${row.providerId}-${row.code}-${i}`,
+      className: row.state === 'fail' ? 'am-dir-warn' : 'am-dir-hint',
+      style: {
+        overflowWrap: 'anywhere'
+      }
+    }, `${row.state === 'running' ? '⏳' : row.state === 'ok' ? '✅' : row.state === 'stopped' ? '⏹' : '❌'} ${row.provider} ${row.code} ${row.title}${row.detail ? ` — ${row.detail}` : ''}${row.seconds != null ? ` · ${row.seconds}초` : ''}`))) : null, liveTest.report ? h("div", null, h("div", {
+      className: "am-dir-label"
+    }, "📋 보고서(키 미포함)"), h("textarea", {
+      id: "liveTestReport",
+      className: "am-dir-input",
+      readOnly: true,
+      rows: 8,
+      value: liveTest.report,
+      onFocus: e => e.target.select(),
+      "data-testid": "live-test-report",
+      style: {
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+        fontSize: 12
+      }
+    })) : null), h("div", {
+      className: "am-dir-foot"
+    }, liveTest.report && !liveTest.running ? h("button", {
+      type: "button",
+      className: "am-dir-btn",
+      onClick: copyLiveTestReport,
+      "data-testid": "live-test-copy"
+    }, "📋 보고서 복사") : null, liveTest.running ? h("button", {
+      type: "button",
+      className: "am-dir-btn am-danger",
+      onClick: stopLiveTest,
+      "data-testid": "live-test-stop"
+    }, "⏹ 중지") : h("button", {
+      type: "button",
+      className: "am-dir-btn am-primary",
+      disabled: !LIVE_TEST_PROVIDERS.some(provider => liveTest.providers?.[provider.id]),
+      onClick: () => setLiveTest(prev => prev ? {
+        ...prev,
+        confirm: true
+      } : prev),
+      "data-testid": "live-test-start"
+    }, "점검 시작"))));
+  };
   // 입력창 위 첨부 트레이(최대 20장): 번호·삭제·기준(★) 지정·다중 편집 방식 선택.
   const renderAttachmentTray = () => {
     if (uploadedImages.length === 0) return null;
@@ -33401,7 +34085,7 @@ const App = () => {
     disabled: !input.trim() && uploadedImages.length === 0 && uploadedDocs.length === 0,
     title: "\uC774\uBBF8\uC9C0 \uC0DD\uC131",
     className: "p-2.5 md:p-3.5 bg-blue-600 text-white rounded-2xl hover:bg-blue-700 disabled:opacity-40 shadow-md flex"
-  }, React.createElement(Icons.Sparkles, null))))))), SettingsModal(), DialogModal(), GalleryModal(), CreditInfoModal(), BalanceModal(), renderSubRoom(), renderItemsPanel(), renderGroupPanel(), renderDirectiveEditor(), React.createElement("input", {
+  }, React.createElement(Icons.Sparkles, null))))))), SettingsModal(), DialogModal(), GalleryModal(), CreditInfoModal(), BalanceModal(), renderSubRoom(), renderItemsPanel(), renderGroupPanel(), renderDirectiveEditor(), renderLiveTestPanel(), React.createElement("input", {
     type: "file",
     accept: "image/*,.heic,.heif",
     className: "hidden",
