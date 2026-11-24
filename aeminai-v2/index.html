@@ -21156,6 +21156,10 @@ const LIVE_KEY_LABELS = {
   openaiAdminKey: 'OpenAI Admin 키'
 };
 const LIVE_KEY_DEBOUNCE_MS = 900;
+// 여러 저장소의 파일이 같은 주소(출처)를 함께 쓰는 공용 미리보기 도메인. 여기서는 브라우저 저장소를 그 도메인의 다른 페이지도 읽을 수 있어
+// API 키를 저장하지 않는다(이 탭 메모리에만 둔다).
+const SHARED_PREVIEW_HOSTS = ['raw.githack.com', 'rawcdn.githack.com'];
+const isSharedPreviewHost = () => typeof location !== 'undefined' && SHARED_PREVIEW_HOSTS.includes(String(location.hostname || '').toLowerCase());
 const LIVE_KEY_TIMEOUT_MS = 25000;
 const LIVE_KEY_RECHECK_MS = 10 * 60 * 1000;
 // 키 모양 힌트(거절됐을 때만 덧붙인다 — 형식은 공급사가 바꿀 수 있어 모양만으로 거절하지 않는다).
@@ -21224,7 +21228,7 @@ const buildLiveKeyFailure = (field, response, key) => {
   };
   if (invalid) return {
     level: 'error',
-    summary: `❌ ${label}가 올바르지 않습니다(HTTP ${response.status})`,
+    summary: `❌ ${label}${josaIGa(label)} 올바르지 않습니다(HTTP ${response.status})`,
     details: [message, hint].filter(Boolean)
   };
   if (response.status === 403) return {
@@ -28572,6 +28576,14 @@ const App = () => {
     fields.forEach((field, i) => scheduleLiveKeyCheck(field, i * 150));
     showToast(`🔑 키 ${fields.length}개를 다시 확인합니다.`);
   };
+  // 공용 미리보기 도메인(raw.githack.com 등)에서는 키 저장을 끈다(키는 이 탭 메모리에만 — 새로고침하면 다시 입력).
+  useEffect(() => {
+    if (!isSharedPreviewHost() || settings.apiKeysRemember === false) return;
+    updateSetting({
+      apiKeysRemember: false
+    });
+    showToast('🔒 공용 미리보기 주소라 API 키를 브라우저에 저장하지 않습니다(이 탭에만 · 새로고침하면 다시 입력).');
+  }, [settings.apiKeysRemember]);
   const liveKeyFingerprints = LIVE_KEY_FIELDS.map(field => keyFingerprint(String(settings[field] || '').trim())).join('|');
   // 키가 바뀌면(입력·붙여넣기·지우기) 그 키만 잠시 뒤 다시 확인한다. 첫 실행(저장된 키)은 설정 창을 열 때 확인한다.
   useEffect(() => {
@@ -28806,7 +28818,10 @@ const App = () => {
       className: "ml-3 text-[11px] text-blue-600 dark:text-blue-400 hover:underline font-semibold transition"
     }, "🔑 모든 키 다시 확인(무료)"), React.createElement("p", {
       className: "mt-1 text-[11px] text-gray-500 dark:text-gray-400 leading-relaxed"
-    }, "키를 넣으면 잠시 뒤 자동으로 확인합니다: 키가 맞는지 + 이 앱이 쓰는 모델을 그 키로 쓸 수 있는지(과금 없는 조회만)."), React.createElement("div", {
+    }, "키를 넣으면 잠시 뒤 자동으로 확인합니다: 키가 맞는지 + 이 앱이 쓰는 모델을 그 키로 쓸 수 있는지(과금 없는 조회만)."), isSharedPreviewHost() ? React.createElement("p", {
+      className: "mt-2 p-2 rounded-lg text-[11px] font-semibold leading-relaxed bg-yellow-50 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-200 border border-yellow-200 dark:border-yellow-800/50",
+      "data-testid": "shared-host-warning"
+    }, `🔒 지금 주소(${location.hostname})는 여러 저장소가 함께 쓰는 공용 미리보기 도메인입니다. 그래서 키를 이 브라우저에 저장하지 않고 이 탭에만 둡니다(새로고침하면 다시 입력). 확인이 끝나면 탭을 닫으세요.`) : null, React.createElement("div", {
       className: "space-y-3 mt-4"
     }, React.createElement("div", {
       className: "p-3 bg-blue-50 dark:bg-blue-950/30 rounded-lg border border-blue-200 dark:border-blue-800"
